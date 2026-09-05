@@ -4,6 +4,7 @@ import contextlib
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
 from dotenv import load_dotenv
+from deepgram.core.events import EventType
 from app.services.assistant import ask_gemini
 from app.services.speech import create_deepgram_client, get_final_transcript
 from app.services.voice import text_to_speech
@@ -21,6 +22,7 @@ def home():
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
+    print("Browser connected")
 
     connection = None
     receiver_task = None
@@ -38,26 +40,38 @@ async def websocket_endpoint(websocket: WebSocket):
             interim_results=True,
             endpointing=300,
         ) as connection:
-            async def receive_deepgram_results():
-                loop = asyncio.get_running_loop()
+            print("Deepgram connected")
+            loop = asyncio.get_running_loop()
 
-                def read_results():
-                    try:
-                        while not stop_receiver.is_set():
-                            result = connection.recv()
-                            transcript = get_final_transcript(result)
-                            if transcript:
-                                loop.call_soon_threadsafe(
-                                    transcript_queue.put_nowait, transcript
-                                )
-                    except Exception as error:
-                        loop.call_soon_threadsafe(
-                            transcript_queue.put_nowait, error
-                        )
+            def handle_deepgram_message(result):
+                transcript = get_final_transcript(result)
+                if transcript:
+                    loop.call_soon_threadsafe(
+                        transcript_queue.put_nowait, transcript
+                    )
 
-                await asyncio.to_thread(read_results)
+            def handle_deepgram_error(error):
+                print("Deepgram error:", error)
+                loop.call_soon_threadsafe(
+                    transcript_queue.put_nowait,
+                    RuntimeError(f"Deepgram error: {error}"),
+                )
 
-            receiver_task = asyncio.create_task(receive_deepgram_results())
+            def handle_deepgram_close(_message):
+                if not stop_receiver.is_set():
+                    error = RuntimeError("Deepgram connection closed")
+                    print("Deepgram error:", error)
+                    loop.call_soon_threadsafe(transcript_queue.put_nowait, error)
+
+            connection.on(EventType.MESSAGE, handle_deepgram_message)
+            connection.on(EventType.ERROR, handle_deepgram_error)
+            connection.on(EventType.CLOSE, handle_deepgram_close)
+
+            # start_listening() blocks while it receives Deepgram messages.
+            # Run it in a worker so this coroutine can keep sending audio.
+            receiver_task = asyncio.create_task(
+                asyncio.to_thread(connection.start_listening)
+            )
 
             while True:
                 audio_task = asyncio.create_task(websocket.receive_bytes())
@@ -71,24 +85,39 @@ async def websocket_endpoint(websocket: WebSocket):
 
                 completed = done.pop()
                 if completed is audio_task:
-                    await asyncio.to_thread(connection.send_media, completed.result())
+                    audio = completed.result()
+                    print("Audio received")
+                    await asyncio.to_thread(connection.send_media, audio)
                     continue
 
                 transcript = completed.result()
                 if isinstance(transcript, Exception):
-                    raise RuntimeError(f"Deepgram error: {transcript}")
+                    raise transcript
 
+                print("Transcript:", transcript)
                 await websocket.send_json({"type": "transcript", "text": transcript})
-                response = await asyncio.to_thread(ask_gemini, transcript)
+                try:
+                    response = await asyncio.to_thread(ask_gemini, transcript)
+                except Exception as error:
+                    print("Gemini error:", error)
+                    await websocket.send_json({
+                        "type": "error",
+                        "text": f"Gemini error: {error}",
+                    })
+                    continue
+
+                print("Gemini response:", response)
                 await websocket.send_json({"type": "response", "text": response})
 
                 try:
+                    print("Generating voice")
                     audio = await asyncio.to_thread(text_to_speech, response)
                     await websocket.send_json({
                         "type": "audio",
                         "data": base64.b64encode(audio).decode("ascii"),
                     })
                 except Exception as error:
+                    print("ElevenLabs error:", error)
                     await websocket.send_json({
                         "type": "error",
                         "text": f"ElevenLabs error: {error}",

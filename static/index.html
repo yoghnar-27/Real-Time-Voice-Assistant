@@ -161,7 +161,7 @@
         let recorder;
         let microphoneStream;
         let assistantAudio;
-        let stopping = false;
+        let isListening = false;
         let audioContext;
         let analyser;
         let speechCheck;
@@ -228,10 +228,10 @@
         }
 
         function stopSession() {
-            stopping = true;
+            isListening = false;
             stopAssistantAudio();
             stopMicrophone();
-            if (socket && socket.readyState === WebSocket.OPEN) {
+            if (socket && socket.readyState !== WebSocket.CLOSED) {
                 socket.close();
             }
             startButton.disabled = false;
@@ -240,21 +240,28 @@
         }
 
         async function startSession() {
-            stopping = false;
+            isListening = true;
             stopAssistantAudio();
             setStatus("Connecting");
             startButton.disabled = true;
+            stopButton.disabled = false;
 
             try {
-                socket = new WebSocket(`${window.location.protocol === "https:" ? "wss" : "ws"}://${window.location.host}/ws`);
+                const currentSocket = new WebSocket(`${window.location.protocol === "https:" ? "wss" : "ws"}://${window.location.host}/ws`);
+                socket = currentSocket;
 
-                socket.onopen = async function() {
+                currentSocket.onopen = async function() {
+                    if (currentSocket !== socket || !isListening) return;
                     try {
                         microphoneStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                        if (!isListening || currentSocket !== socket) {
+                            microphoneStream.getTracks().forEach((track) => track.stop());
+                            return;
+                        }
                         recorder = new MediaRecorder(microphoneStream);
                         recorder.ondataavailable = function(event) {
-                            if (event.data.size && socket.readyState === WebSocket.OPEN) {
-                                socket.send(event.data);
+                            if (event.data.size && currentSocket.readyState === WebSocket.OPEN) {
+                                currentSocket.send(event.data);
                             }
                         };
                         recorder.start(250);
@@ -267,7 +274,8 @@
                     }
                 };
 
-                socket.onmessage = function(event) {
+                currentSocket.onmessage = function(event) {
+                    if (currentSocket !== socket || !isListening) return;
                     const message = JSON.parse(event.data);
                     if (message.type === "transcript") {
                         transcriptText.innerText = message.text;
@@ -280,7 +288,7 @@
                         setStatus("Speaking");
                         assistantAudio.onended = function() {
                             assistantAudio = null;
-                            if (!stopping) setStatus("Listening");
+                            if (isListening) setStatus("Listening");
                         };
                         assistantAudio.onerror = function() {
                             setStatus("Audio playback error", true);
@@ -291,17 +299,23 @@
                     }
                 };
 
-                socket.onerror = function() {
+                currentSocket.onerror = function() {
+                    if (currentSocket !== socket || !isListening) return;
                     setStatus("Connection error", true);
                 };
 
-                socket.onclose = function() {
+                currentSocket.onclose = function() {
+                    if (currentSocket !== socket) return;
                     stopMicrophone();
                     startButton.disabled = false;
                     stopButton.disabled = true;
-                    if (!stopping) setStatus("Disconnected", true);
+                    if (isListening) {
+                        isListening = false;
+                        setStatus("Disconnected", true);
+                    }
                 };
             } catch (error) {
+                isListening = false;
                 setStatus("Connection error", true);
                 startButton.disabled = false;
             }
