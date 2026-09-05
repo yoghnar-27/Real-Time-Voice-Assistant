@@ -2,12 +2,22 @@ import os
 from dotenv import load_dotenv
 from google import genai
 from app.tools.basic_tools import get_time, save_note
+from app.tools.gmail import (
+    has_pending_email,
+    is_confirmation,
+    pending_email_confirmation,
+    request_email,
+    send_pending_email,
+)
 
 load_dotenv()
 
 
 def ask_gemini(transcript: str) -> str:
     """Send one final transcript to Gemini and return its text response."""
+    if has_pending_email() and is_confirmation(transcript):
+        return send_pending_email()
+
     api_key = os.getenv("GEMINI_API_KEY")
     if not api_key:
         raise RuntimeError("GEMINI_API_KEY is missing")
@@ -21,8 +31,10 @@ def ask_gemini(transcript: str) -> str:
                 "You are a helpful voice assistant. Keep replies short and natural. "
                 "Use a tool when the user's request matches one."
             ),
-            "tools": [get_time, save_note],
+            "tools": [get_time, save_note, request_email],
         },
     )
 
+    if has_pending_email():
+        return pending_email_confirmation()
     return response.text or "I could not generate a response."
