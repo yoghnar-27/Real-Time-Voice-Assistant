@@ -1,0 +1,73 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Voice Assistant</title>
+</head>
+
+<body>
+
+    <h1>Voice Assistant</h1>
+
+    <button id="start">Start</button>
+    <p id="status">Not connected</p>
+    <p>Transcript: <span id="transcript"></span></p>
+    <p>Assistant: <span id="response"></span></p>
+
+    <script>
+        let socket;
+        let recorder;
+
+        document.getElementById("start").onclick = async function() {
+
+            document.getElementById("status").innerText = "Connecting...";
+
+            socket = new WebSocket("ws://127.0.0.1:8000/ws");
+
+            socket.onopen = async function() {
+
+                document.getElementById("status").innerText = "Connected";
+
+                const stream = await navigator.mediaDevices.getUserMedia({
+                    audio: true
+                });
+
+                recorder = new MediaRecorder(stream);
+
+                recorder.ondataavailable = function(event) {
+                    if (socket.readyState === WebSocket.OPEN) {
+                        socket.send(event.data);
+                    }
+                };
+
+                recorder.start(250);
+
+                document.getElementById("status").innerText =
+                    "Listening...";
+            };
+
+            socket.onmessage = function(event) {
+                const message = JSON.parse(event.data);
+
+                if (message.type === "transcript") {
+                    document.getElementById("transcript").innerText = message.text;
+                }
+
+                if (message.type === "response") {
+                    document.getElementById("response").innerText = message.text;
+                    document.getElementById("status").innerText = "Listening...";
+                }
+
+                if (message.type === "error") {
+                    document.getElementById("status").innerText = message.text;
+                }
+            };
+
+            socket.onerror = function() {
+                document.getElementById("status").innerText =
+                    "Connection error";
+            };
+        };
+    </script>
+
+</body>
+</html>
