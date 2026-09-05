@@ -1,10 +1,12 @@
 import asyncio
+import base64
 import contextlib
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
 from dotenv import load_dotenv
 from app.services.assistant import ask_gemini
 from app.services.speech import create_deepgram_client, get_final_transcript
+from app.services.voice import text_to_speech
 
 load_dotenv()
 
@@ -79,6 +81,18 @@ async def websocket_endpoint(websocket: WebSocket):
                 await websocket.send_json({"type": "transcript", "text": transcript})
                 response = await asyncio.to_thread(ask_gemini, transcript)
                 await websocket.send_json({"type": "response", "text": response})
+
+                try:
+                    audio = await asyncio.to_thread(text_to_speech, response)
+                    await websocket.send_json({
+                        "type": "audio",
+                        "data": base64.b64encode(audio).decode("ascii"),
+                    })
+                except Exception as error:
+                    await websocket.send_json({
+                        "type": "error",
+                        "text": f"ElevenLabs error: {error}",
+                    })
 
     except WebSocketDisconnect:
         print("Browser disconnected")

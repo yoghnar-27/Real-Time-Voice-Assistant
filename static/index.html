@@ -1,73 +1,314 @@
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
-    <title>Voice Assistant</title>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Real-Time Voice Assistant</title>
+    <style>
+        :root {
+            color-scheme: light;
+            --ink: #17212b;
+            --muted: #65727e;
+            --paper: #f5f7f4;
+            --panel: #ffffff;
+            --line: #dce4df;
+            --accent: #176b5b;
+            --accent-dark: #0e4b40;
+            --danger: #a53b35;
+        }
+
+        * { box-sizing: border-box; }
+
+        body {
+            margin: 0;
+            min-height: 100vh;
+            background: linear-gradient(135deg, #eef5f0, #f7f3ea);
+            color: var(--ink);
+            font-family: Georgia, "Times New Roman", serif;
+        }
+
+        main {
+            width: min(760px, calc(100% - 32px));
+            margin: 0 auto;
+            padding: 64px 0;
+        }
+
+        .eyebrow {
+            margin: 0 0 10px;
+            color: var(--accent);
+            font: 700 0.78rem/1.2 Arial, sans-serif;
+            letter-spacing: 0.12em;
+            text-transform: uppercase;
+        }
+
+        h1 {
+            max-width: 560px;
+            margin: 0;
+            font-size: clamp(2.6rem, 8vw, 5.4rem);
+            line-height: 0.95;
+            font-weight: 500;
+        }
+
+        .intro {
+            max-width: 520px;
+            margin: 22px 0 34px;
+            color: var(--muted);
+            font: 1.05rem/1.6 Arial, sans-serif;
+        }
+
+        .controls {
+            display: flex;
+            gap: 12px;
+            margin-bottom: 22px;
+        }
+
+        button {
+            border: 0;
+            border-radius: 5px;
+            padding: 13px 22px;
+            color: white;
+            background: var(--accent);
+            cursor: pointer;
+            font: 700 0.9rem Arial, sans-serif;
+        }
+
+        button:hover:not(:disabled) { background: var(--accent-dark); }
+        button:disabled { cursor: not-allowed; opacity: 0.45; }
+        #stop { background: #53616a; }
+
+        .status {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            margin-bottom: 22px;
+            color: var(--muted);
+            font: 700 0.85rem Arial, sans-serif;
+            text-transform: uppercase;
+        }
+
+        .indicator {
+            width: 11px;
+            height: 11px;
+            border-radius: 50%;
+            background: #9aa5a3;
+        }
+
+        .indicator.active { background: var(--accent); box-shadow: 0 0 0 5px #d4ebe3; }
+        .indicator.error { background: var(--danger); }
+
+        .conversation {
+            display: grid;
+            gap: 14px;
+        }
+
+        .message {
+            padding: 20px;
+            border: 1px solid var(--line);
+            border-radius: 7px;
+            background: var(--panel);
+        }
+
+        .message h2 {
+            margin: 0 0 9px;
+            color: var(--accent);
+            font: 700 0.76rem Arial, sans-serif;
+            letter-spacing: 0.1em;
+            text-transform: uppercase;
+        }
+
+        .message p {
+            min-height: 26px;
+            margin: 0;
+            font: 1.18rem/1.45 Arial, sans-serif;
+        }
+
+        @media (max-width: 520px) {
+            main { padding: 40px 0; }
+            h1 { font-size: 3.3rem; }
+        }
+    </style>
 </head>
-
 <body>
+    <main>
+        <p class="eyebrow">Real-time voice assistant</p>
+        <h1>Speak naturally. Get things done.</h1>
+        <p class="intro">A simple voice conversation powered by Deepgram, Gemini, and ElevenLabs.</p>
 
-    <h1>Voice Assistant</h1>
+        <div class="controls">
+            <button id="start">Start listening</button>
+            <button id="stop" disabled>Stop</button>
+        </div>
 
-    <button id="start">Start</button>
-    <p id="status">Not connected</p>
-    <p>Transcript: <span id="transcript"></span></p>
-    <p>Assistant: <span id="response"></span></p>
+        <div class="status" aria-live="polite">
+            <span id="indicator" class="indicator"></span>
+            <span id="status">Ready</span>
+        </div>
+
+        <section class="conversation">
+            <article class="message">
+                <h2>You said</h2>
+                <p id="transcript">Waiting for your voice...</p>
+            </article>
+            <article class="message">
+                <h2>Assistant</h2>
+                <p id="response">Your response will appear here.</p>
+            </article>
+        </section>
+    </main>
 
     <script>
         let socket;
         let recorder;
+        let microphoneStream;
+        let assistantAudio;
+        let stopping = false;
+        let audioContext;
+        let analyser;
+        let speechCheck;
 
-        document.getElementById("start").onclick = async function() {
+        const startButton = document.getElementById("start");
+        const stopButton = document.getElementById("stop");
+        const statusText = document.getElementById("status");
+        const indicator = document.getElementById("indicator");
+        const transcriptText = document.getElementById("transcript");
+        const responseText = document.getElementById("response");
 
-            document.getElementById("status").innerText = "Connecting...";
+        function setStatus(text, isError = false) {
+            statusText.innerText = text;
+            indicator.className = isError ? "indicator error" : "indicator";
+            if (["Listening", "Thinking", "Speaking"].includes(text)) {
+                indicator.className = "indicator active";
+            }
+        }
 
-            socket = new WebSocket("ws://127.0.0.1:8000/ws");
+        function stopAssistantAudio() {
+            if (assistantAudio) {
+                assistantAudio.pause();
+                assistantAudio.currentTime = 0;
+                assistantAudio = null;
+            }
+        }
 
-            socket.onopen = async function() {
+        function stopMicrophone() {
+            if (speechCheck) {
+                clearInterval(speechCheck);
+                speechCheck = null;
+            }
+            if (recorder && recorder.state !== "inactive") {
+                recorder.stop();
+            }
+            if (microphoneStream) {
+                microphoneStream.getTracks().forEach((track) => track.stop());
+                microphoneStream = null;
+            }
+            if (audioContext) {
+                audioContext.close();
+                audioContext = null;
+                analyser = null;
+            }
+            recorder = null;
+        }
 
-                document.getElementById("status").innerText = "Connected";
+        function watchForSpeech() {
+            audioContext = new AudioContext();
+            const source = audioContext.createMediaStreamSource(microphoneStream);
+            analyser = audioContext.createAnalyser();
+            analyser.fftSize = 512;
+            source.connect(analyser);
+            const samples = new Uint8Array(analyser.fftSize);
 
-                const stream = await navigator.mediaDevices.getUserMedia({
-                    audio: true
-                });
+            speechCheck = setInterval(() => {
+                if (!assistantAudio) return;
+                analyser.getByteTimeDomainData(samples);
+                const volume = samples.reduce(
+                    (total, sample) => total + Math.abs(sample - 128), 0
+                ) / samples.length;
+                if (volume > 10) stopAssistantAudio();
+            }, 100);
+        }
 
-                recorder = new MediaRecorder(stream);
+        function stopSession() {
+            stopping = true;
+            stopAssistantAudio();
+            stopMicrophone();
+            if (socket && socket.readyState === WebSocket.OPEN) {
+                socket.close();
+            }
+            startButton.disabled = false;
+            stopButton.disabled = true;
+            setStatus("Stopped");
+        }
 
-                recorder.ondataavailable = function(event) {
-                    if (socket.readyState === WebSocket.OPEN) {
-                        socket.send(event.data);
+        async function startSession() {
+            stopping = false;
+            stopAssistantAudio();
+            setStatus("Connecting");
+            startButton.disabled = true;
+
+            try {
+                socket = new WebSocket(`${window.location.protocol === "https:" ? "wss" : "ws"}://${window.location.host}/ws`);
+
+                socket.onopen = async function() {
+                    try {
+                        microphoneStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                        recorder = new MediaRecorder(microphoneStream);
+                        recorder.ondataavailable = function(event) {
+                            if (event.data.size && socket.readyState === WebSocket.OPEN) {
+                                socket.send(event.data);
+                            }
+                        };
+                        recorder.start(250);
+                        watchForSpeech();
+                        stopButton.disabled = false;
+                        setStatus("Listening");
+                    } catch (error) {
+                        setStatus("Microphone permission denied", true);
+                        stopSession();
                     }
                 };
 
-                recorder.start(250);
+                socket.onmessage = function(event) {
+                    const message = JSON.parse(event.data);
+                    if (message.type === "transcript") {
+                        transcriptText.innerText = message.text;
+                        setStatus("Thinking");
+                    } else if (message.type === "response") {
+                        responseText.innerText = message.text;
+                    } else if (message.type === "audio") {
+                        stopAssistantAudio();
+                        assistantAudio = new Audio(`data:audio/mpeg;base64,${message.data}`);
+                        setStatus("Speaking");
+                        assistantAudio.onended = function() {
+                            assistantAudio = null;
+                            if (!stopping) setStatus("Listening");
+                        };
+                        assistantAudio.onerror = function() {
+                            setStatus("Audio playback error", true);
+                        };
+                        assistantAudio.play().catch(() => setStatus("Audio playback blocked", true));
+                    } else if (message.type === "error") {
+                        setStatus(message.text, true);
+                    }
+                };
 
-                document.getElementById("status").innerText =
-                    "Listening...";
-            };
+                socket.onerror = function() {
+                    setStatus("Connection error", true);
+                };
 
-            socket.onmessage = function(event) {
-                const message = JSON.parse(event.data);
+                socket.onclose = function() {
+                    stopMicrophone();
+                    startButton.disabled = false;
+                    stopButton.disabled = true;
+                    if (!stopping) setStatus("Disconnected", true);
+                };
+            } catch (error) {
+                setStatus("Connection error", true);
+                startButton.disabled = false;
+            }
+        }
 
-                if (message.type === "transcript") {
-                    document.getElementById("transcript").innerText = message.text;
-                }
-
-                if (message.type === "response") {
-                    document.getElementById("response").innerText = message.text;
-                    document.getElementById("status").innerText = "Listening...";
-                }
-
-                if (message.type === "error") {
-                    document.getElementById("status").innerText = message.text;
-                }
-            };
-
-            socket.onerror = function() {
-                document.getElementById("status").innerText =
-                    "Connection error";
-            };
-        };
+        startButton.onclick = startSession;
+        stopButton.onclick = stopSession;
     </script>
-
 </body>
 </html>
